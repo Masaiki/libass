@@ -407,21 +407,25 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
     int i, index, uid;
     ASS_FontStream stream = { NULL, NULL };
     FT_Face face;
+    int ret = -1;
+
+    ass_fontselect_lock(fontsel);
 
     if (font->n_faces == ASS_FONT_MAX_FACES)
-        return -1;
+        goto fail;
 
     path = ass_font_select(fontsel, font, &index,
             &postscript_name, &uid, &stream, ch);
 
     if (!path)
-        return -1;
+        goto fail;
 
     for (i = 0; i < font->n_faces; i++) {
         if (font->faces_uid[i] == uid) {
             ass_msg(font->library, MSGL_INFO,
                     "Got a font face that already is available! Skipping.");
-            return i;
+            ret = i;
+            goto fail;
         }
     }
 
@@ -434,15 +438,22 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
     }
 
     if (!face)
-        return -1;
+        goto fail;
 
     ass_charmap_magic(font->library, face);
     set_font_metrics(face);
 
     font->faces[font->n_faces] = face;
-    font->faces_uid[font->n_faces++] = uid;
+    font->faces_uid[font->n_faces] = uid;
     ass_face_set_size(face, font->size);
-    return font->n_faces - 1;
+
+    ret = assi_inc_int_release(&font->n_faces) - 1;
+
+fail:
+
+    ass_fontselect_unlock(fontsel);
+
+    return ret;
 }
 
 /**
@@ -476,8 +487,19 @@ size_t ass_font_construct(void *key, void *value, void *priv)
 
     font->size = 0.;
 
-    int error = add_face(render_priv->fontselect, font, 0);
-    if (error == -1)
+    int ret = add_face(render_priv->fontselect, font, 0);
+    if (ret < 0)
+        goto fail;
+
+#if ENABLE_THREADS
+    if (!assi_mutex_init(&font->mutex, NULL)) {
+        ret = -1;
+        goto fail;
+    }
+#endif
+
+fail:
+    if (ret < 0)
         font->library = NULL;
     return 1;
 }
@@ -542,6 +564,7 @@ static void ass_glyph_embolden(FT_GlyphSlot slot)
  * \brief Get glyph and face index
  * Finds a face that has the requested codepoint and returns both face
  * and glyph index.
+ * Must be called under lock.
  */
 int ass_font_get_index(ASS_FontSelector *fontsel, ASS_Font *font,
                        uint32_t symbol, int *face_index, int *glyph_index)
@@ -663,6 +686,24 @@ void ass_font_clear(ASS_Font *font)
             FT_Done_Face(font->faces[i]);
     }
     free((char *) font->desc.family.str);
+
+#if ENABLE_THREADS
+    assi_mutex_destroy(&font->mutex);
+#endif
+}
+
+void ass_font_lock(ASS_Font *font)
+{
+#if ENABLE_THREADS
+    assi_mutex_lock(&font->mutex);
+#endif
+}
+
+void ass_font_unlock(ASS_Font *font)
+{
+#if ENABLE_THREADS
+    assi_mutex_unlock(&font->mutex);
+#endif
 }
 
 /**
