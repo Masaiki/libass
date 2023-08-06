@@ -80,6 +80,7 @@ struct ass_shaper {
 struct ass_shaper_metrics_data {
     Cache *metrics_cache;
     FaceSizeMetricsHashKey hash_key;
+    int vertical;
 };
 
 /**
@@ -214,20 +215,14 @@ static FT_Glyph_Metrics *
 get_cached_metrics(struct ass_shaper_metrics_data *metrics,
                    hb_codepoint_t unicode, hb_codepoint_t glyph)
 {
-    bool rotate = false;
-    // if @font rendering is enabled and the glyph should be rotated,
-    // make cached_h_advance pick up the right advance later
-    if (metrics->hash_key.font->desc.vertical && unicode >= VERTICAL_LOWER_BOUND)
-        rotate = true;
-
     GlyphMetricsHashKey key = {
         .font = metrics->hash_key.font,
         .face_index = metrics->hash_key.face_index,
         .size = metrics->hash_key.size,
         .glyph_index = glyph,
+        .vertical = metrics->vertical,
     };
-    FT_Glyph_Metrics *val = ass_cache_get(metrics->metrics_cache, &key,
-                                          rotate ? metrics : NULL);
+    FT_Glyph_Metrics *val = ass_cache_get(metrics->metrics_cache, &key, NULL);
     if (!val || val->width < 0)
         return NULL;
 
@@ -267,7 +262,9 @@ size_t ass_glyph_metrics_construct(void *key, void *value, void *priv)
 
     memcpy(v, &face->glyph->metrics, sizeof(FT_Glyph_Metrics));
 
-    if (priv)  // rotate
+    // if @font rendering is enabled and the glyph should be rotated,
+    // make cached_h_advance pick up the right advance later
+    if (k->vertical)
         v->horiAdvance = v->vertAdvance;
 
     return 1;
@@ -487,6 +484,7 @@ static hb_font_t *get_hb_font(ASS_Shaper *shaper, GlyphInfo *info)
     }
     metrics->metrics_cache = shaper->metrics_cache;
     metrics->hash_key = key;
+    metrics->vertical = !!(info->flags & DECO_ROTATE);
 
     hb_font_set_funcs(hb_font, shaper->font_funcs, metrics, free);
 
@@ -868,6 +866,10 @@ void ass_shaper_find_runs(ASS_Shaper *shaper, ASS_Renderer *render_priv,
             // get font face and glyph index
             ass_font_get_index(render_priv->fontselect, info->font,
                     info->symbol, &info->face_index, &info->glyph_index);
+
+            if (info->font->desc.vertical &&
+                ass_codepoint_is_fullwidth(info->font->faces_cp[info->face_index], info->symbol))
+                info->flags |= DECO_ROTATE;
         }
         if (i > 0) {
             GlyphInfo *last = glyphs + i - 1;
