@@ -954,7 +954,6 @@ bool ass_codepoint_is_fullwidth(FT_Encoding encoding, uint32_t symbol)
         uint32_t low, high;
     } ranges[] = {
         { 0x1100, 0x11ff }, // Hangul Jamo
-        { 0x2000, 0x206f }, // General Punctuation
         { 0x2100, 0x214f }, // Letterlike Symbols
         { 0x2460, 0x24ff }, // Enclosed Alphanumerics
         { 0x25a0, 0x27ff }, // Geometric shapes, misc symbols

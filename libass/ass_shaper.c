@@ -603,6 +603,31 @@ hb_shaper_get_run_language(ASS_Shaper *shaper, hb_script_t script)
     return lang;
 }
 
+static bool needs_vertical_common_substitutions(GlyphInfo *glyphs, int offset, int end)
+{
+    for (int i = offset; i <= end; i++) {
+        GlyphInfo *info = glyphs + i;
+        if (info->drawing_text.str || !(info->flags & DECO_ROTATE))
+            return false;
+
+        hb_script_t script = hb_unicode_script(hb_unicode_funcs_get_default(),
+                                               info->symbol);
+        if (script != HB_SCRIPT_COMMON && script != HB_SCRIPT_INHERITED)
+            return false;
+    }
+
+    return true;
+}
+
+static bool needs_vertical_common_offset(GlyphInfo *info)
+{
+    hb_script_t script = hb_unicode_script(hb_unicode_funcs_get_default(),
+                                           info->symbol);
+
+    return info->font->desc.vertical && (info->flags & DECO_ROTATE) &&
+           (script == HB_SCRIPT_COMMON || script == HB_SCRIPT_INHERITED);
+}
+
 /**
  * \brief Feed a run of shaped characters into the GlyphInfo array.
  *
@@ -611,7 +636,8 @@ hb_shaper_get_run_language(ASS_Shaper *shaper, hb_script_t script)
  * \param offset offset into GlyphInfo array
  */
 static void
-shape_harfbuzz_process_run(GlyphInfo *glyphs, hb_buffer_t *buf, int offset)
+shape_harfbuzz_process_run(hb_font_t *font, GlyphInfo *glyphs,
+                           hb_buffer_t *buf, int offset)
 {
     int j;
     int num_glyphs = hb_buffer_get_length(buf);
@@ -637,17 +663,83 @@ shape_harfbuzz_process_run(GlyphInfo *glyphs, hb_buffer_t *buf, int offset)
         }
 
         // set position and advance
+        int glyph_index = glyph_info[j].codepoint;
         info->skip = false;
-        info->glyph_index = glyph_info[j].codepoint;
+        info->glyph_index = glyph_index;
         info->offset.x    = ass_lrint(pos[j].x_offset * info->scale_x);
         info->offset.y    = ass_lrint(-pos[j].y_offset * info->scale_y);
         info->advance.x   = ass_lrint(pos[j].x_advance * info->scale_x);
         info->advance.y   = ass_lrint(-pos[j].y_advance * info->scale_y);
+        if (needs_vertical_common_offset(info)) {
+            hb_glyph_extents_t extents;
+            if (hb_font_get_glyph_extents(font, glyph_index, &extents)) {
+                // Common vertical alternates need the shaping origin aligned
+                // here; outline rotation must not apply another correction.
+                hb_position_t position_adjust =
+                    extents.x_bearing + extents.width / 2 - pos[j].x_advance / 2;
+                info->offset.x += ass_lrint(position_adjust * info->scale_x);
+            }
+        }
 
         // accumulate advance in the root glyph
         root->cluster_advance.x += info->advance.x;
         root->cluster_advance.y += info->advance.y;
     }
+}
+
+static bool copy_glyphs_by_cluster(hb_buffer_t *dst, hb_buffer_t *src)
+{
+    unsigned dst_len = hb_buffer_get_length(dst);
+    unsigned src_len = hb_buffer_get_length(src);
+    hb_glyph_info_t *dst_info = hb_buffer_get_glyph_infos(dst, NULL);
+    hb_glyph_info_t *src_info = hb_buffer_get_glyph_infos(src, NULL);
+
+    if (dst_len != src_len)
+        return false;
+
+    for (unsigned i = 0; i < dst_len; i++) {
+        if (dst_info[i].cluster != src_info[i].cluster)
+            return false;
+    }
+
+    for (unsigned i = 0; i < dst_len; i++)
+        dst_info[i].codepoint = src_info[i].codepoint;
+
+    return true;
+}
+
+static hb_buffer_t *shape_vertical_substitutions(ASS_Shaper *shaper,
+        hb_font_t *font, GlyphInfo *glyphs, size_t len, int offset, int end,
+        int lead_context, int trail_context, hb_segment_properties_t *props)
+{
+    if (!needs_vertical_common_substitutions(glyphs, offset, end))
+        return NULL;
+
+    hb_buffer_t *buf = hb_buffer_create();
+    if (!hb_buffer_allocation_successful(buf)) {
+        hb_buffer_destroy(buf);
+        return NULL;
+    }
+
+    if (shaper->whole_text_layout) {
+        hb_buffer_add_utf32(buf, shaper->event_text, len,
+                            offset, end - offset + 1);
+    } else {
+        hb_buffer_add_utf32(buf,
+                            shaper->event_text + offset - lead_context,
+                            end - offset + 1 + lead_context + trail_context,
+                            lead_context, end - offset + 1);
+    }
+
+    hb_segment_properties_t vertical_props = *props;
+    vertical_props.direction = HB_DIRECTION_TTB;
+    hb_buffer_set_segment_properties(buf, &vertical_props);
+
+    set_run_features(shaper, glyphs + offset);
+    shaper->features[VERT].value = shaper->features[VKNA].value = 0;
+    hb_shape(font, buf, shaper->features, shaper->n_features);
+
+    return buf;
 }
 
 /**
@@ -709,10 +801,19 @@ static bool shape_harfbuzz(ASS_Shaper *shaper, GlyphInfo *glyphs, size_t len)
         props.language  = hb_shaper_get_run_language(shaper, props.script);
         hb_buffer_set_segment_properties(buf, &props);
 
+        hb_buffer_t *vertical_buf = glyphs[offset].font->desc.vertical ?
+            shape_vertical_substitutions(shaper, font, glyphs, len, offset, i,
+                                         lead_context, trail_context, &props) :
+            NULL;
+
         set_run_features(shaper, glyphs + offset);
         hb_shape(font, buf, shaper->features, shaper->n_features);
+        if (vertical_buf) {
+            copy_glyphs_by_cluster(buf, vertical_buf);
+            hb_buffer_destroy(vertical_buf);
+        }
 
-        shape_harfbuzz_process_run(glyphs, buf,
+        shape_harfbuzz_process_run(font, glyphs, buf,
                 shaper->whole_text_layout ? 0 : offset - lead_context);
         hb_buffer_reset(buf);
 
