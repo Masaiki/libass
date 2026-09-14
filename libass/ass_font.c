@@ -552,7 +552,7 @@ static uint32_t get_cp_mask(FT_Face face, bool is_mincho_gothic)
 {
     TT_OS2 *os2 = FT_Get_Sfnt_Table(face, FT_SFNT_OS2);
 
-    if (!os2 || os2->version < 1 || !os2->ulUnicodeRange1)
+    if (!os2 || os2->version < 1 || !os2->ulCodePageRange1)
         return 0;
 
     uint32_t ranges = os2->ulCodePageRange1;
@@ -626,9 +626,9 @@ static int add_face(ASS_FontSelector *fontsel, ASS_Font *font, uint32_t ch)
         if (cp_mask) {
             if (cp_mask & (1 << 17))
                 font->faces_cp[font->n_faces] = FT_ENCODING_MS_SJIS;
-            else if (cp_mask & (1 << 20))
-                font->faces_cp[font->n_faces] = FT_ENCODING_MS_GB2312;
             else if (cp_mask & (1 << 18))
+                font->faces_cp[font->n_faces] = FT_ENCODING_MS_GB2312;
+            else if (cp_mask & (1 << 20))
                 font->faces_cp[font->n_faces] = FT_ENCODING_MS_BIG5;
             else if (cp_mask & (1 << 19))
                 font->faces_cp[font->n_faces] = FT_ENCODING_MS_WANSUNG;
